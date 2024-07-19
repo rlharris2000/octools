@@ -1,10 +1,9 @@
 import sys
 import datetime
 import xml.etree.ElementTree as ET
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QFileDialog, QLabel, QTextEdit, QDateEdit, \
-    QHBoxLayout
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QFileDialog, QLabel, QTextEdit, QDateEdit, QHBoxLayout
 from PyQt5.QtCore import QDate
-
+from concurrent.futures import ThreadPoolExecutor
 
 class LogAnalyzer(QWidget):
     def __init__(self):
@@ -17,11 +16,11 @@ class LogAnalyzer(QWidget):
         layout = QVBoxLayout()
 
         # Log File Upload
-        self.upload_btn = QPushButton('Upload Log File', self)
-        self.upload_btn.clicked.connect(self.upload_log_file)
+        self.upload_btn = QPushButton('Upload Log Files', self)
+        self.upload_btn.clicked.connect(self.upload_log_files)
         layout.addWidget(self.upload_btn)
 
-        self.log_file_label = QLabel('No file uploaded', self)
+        self.log_file_label = QLabel('No files uploaded', self)
         layout.addWidget(self.log_file_label)
 
         # Date Range
@@ -49,17 +48,16 @@ class LogAnalyzer(QWidget):
 
         self.setLayout(layout)
 
-    def upload_log_file(self):
+    def upload_log_files(self):
         options = QFileDialog.Options()
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open Log File", "", "Log Files (*.log);;All Files (*)",
-                                                   options=options)
-        if file_path:
-            self.log_file_path = file_path
-            self.log_file_label.setText(f'File: {file_path}')
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Open Log Files", "", "Log Files (*.log);;All Files (*)", options=options)
+        if file_paths:
+            self.log_file_paths = file_paths
+            self.log_file_label.setText(f'{len(file_paths)} files uploaded')
 
     def check_for_errors(self):
-        if not hasattr(self, 'log_file_path'):
-            self.result_text.setText('Please upload a log file first.')
+        if not hasattr(self, 'log_file_paths'):
+            self.result_text.setText('Please upload log files first.')
             return
 
         start_date = self.start_date_edit.date().toPyDate()
@@ -71,23 +69,24 @@ class LogAnalyzer(QWidget):
         with open(filtered_log_file_path, 'w') as file:
             file.writelines(filtered_lines)
 
-        # Check for specific errors
+        # Check for specific errors using multithreading
         errors = self.find_errors(filtered_lines)
 
         self.result_text.setText(f'Filtered logs saved to {filtered_log_file_path}\n\nErrors:\n{errors}')
 
     def filter_logs_by_date(self, start_date, end_date):
         filtered_lines = []
-        include_line = False
-        with open(self.log_file_path, 'r') as file:
-            for line in file:
-                if 'Date:' in line:
-                    log_date_str = line.split()[1]
-                    log_date = datetime.datetime.strptime(log_date_str, '%m/%d/%Y').date()
-                    include_line = start_date <= log_date <= end_date
+        for file_path in self.log_file_paths:
+            include_line = False
+            with open(file_path, 'r') as file:
+                for line in file:
+                    if 'Date:' in line:
+                        log_date_str = line.split()[1]
+                        log_date = datetime.datetime.strptime(log_date_str, '%m/%d/%Y').date()
+                        include_line = start_date <= log_date <= end_date
 
-                if include_line:
-                    filtered_lines.append(line)
+                    if include_line:
+                        filtered_lines.append(line)
         return filtered_lines
 
     def find_errors(self, lines):
@@ -96,33 +95,40 @@ class LogAnalyzer(QWidget):
         inside_rstream = False
         current_date = None
 
-        for line in lines:
-            if 'Date:' in line:
-                current_date = line.strip()
-            elif '<RStream>' in line:
-                inside_rstream = True
-                current_message = [line]
-            elif '</RStream>' in line:
-                inside_rstream = False
-                current_message.append(line)
-                error_message = self.check_message_for_error(current_message, current_date)
+        def process_message(message_lines, date):
+            message = ''.join(message_lines)
+            try:
+                root = ET.fromstring(message)
+                text_response = root.find('.//TextResponse')
+                if text_response is not None and "There still are requests to be forwarded. All \"Store And Forward\" requests should be forwarded before closing a batch." in text_response.text:
+                    return f"{date}\nError: There still are requests to be forwarded. All 'Store And Forward' requests should be forwarded before closing a batch."
+            except ET.ParseError:
+                pass
+            return None
+
+        with ThreadPoolExecutor() as executor:
+            futures = []
+
+            for line in lines:
+                if 'Date:' in line:
+                    current_date = line.strip()
+                elif '<RStream>' in line:
+                    inside_rstream = True
+                    current_message = [line]
+                elif '</RStream>' in line:
+                    inside_rstream = False
+                    current_message.append(line)
+                    futures.append(executor.submit(process_message, current_message, current_date))
+                    current_message = []
+                elif inside_rstream:
+                    current_message.append(line)
+
+            for future in futures:
+                error_message = future.result()
                 if error_message:
                     error_lines.append(error_message)
-                current_message = []
-            elif inside_rstream:
-                current_message.append(line)
-        return '\n'.join(error_lines)
 
-    def check_message_for_error(self, message_lines, date):
-        message = ''.join(message_lines)
-        try:
-            root = ET.fromstring(message)
-            text_response = root.find('.//TextResponse')
-            if text_response is not None and "There still are requests to be forwarded. All \"Store And Forward\" requests should be forwarded before closing a batch." in text_response.text:
-                return f"{date}\nError: There still are requests to be forwarded. All 'Store And Forward' requests should be forwarded before closing a batch."
-        except ET.ParseError:
-            pass
-        return None
+        return '\n'.join(error_lines)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
