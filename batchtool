@@ -1,78 +1,72 @@
 import sys
 import datetime
 import xml.etree.ElementTree as ET
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QFileDialog, QLabel, QTextEdit, QDateEdit, QHBoxLayout
+import logging
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QFileDialog, QLabel, QTextEdit, QDateEdit, \
+    QHBoxLayout
 from PyQt5.QtCore import QDate
 from concurrent.futures import ThreadPoolExecutor
+import openai
+
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 class LogAnalyzer(QWidget):
     def __init__(self):
         super().__init__()
         self.initUI()
+        self.log_file_paths = []
 
     def initUI(self):
         self.setWindowTitle('Log Analyzer')
-
         layout = QVBoxLayout()
-
-        # Log File Upload
         self.upload_btn = QPushButton('Upload Log Files', self)
         self.upload_btn.clicked.connect(self.upload_log_files)
         layout.addWidget(self.upload_btn)
-
         self.log_file_label = QLabel('No files uploaded', self)
         layout.addWidget(self.log_file_label)
 
-        # Date Range
         date_layout = QHBoxLayout()
-
         self.start_date_edit = QDateEdit(calendarPopup=True)
         self.start_date_edit.setDate(QDate.currentDate().addDays(-1))
         date_layout.addWidget(QLabel('Start Date:', self))
         date_layout.addWidget(self.start_date_edit)
-
         self.end_date_edit = QDateEdit(calendarPopup=True)
         self.end_date_edit.setDate(QDate.currentDate())
         date_layout.addWidget(QLabel('End Date:', self))
         date_layout.addWidget(self.end_date_edit)
-
         layout.addLayout(date_layout)
 
-        # Error Check
         self.error_check_btn = QPushButton('Check for Errors', self)
         self.error_check_btn.clicked.connect(self.check_for_errors)
         layout.addWidget(self.error_check_btn)
-
         self.result_text = QTextEdit(self)
         layout.addWidget(self.result_text)
-
         self.setLayout(layout)
 
     def upload_log_files(self):
+        logging.debug("Upload log files button clicked.")
         options = QFileDialog.Options()
-        file_paths, _ = QFileDialog.getOpenFileNames(self, "Open Log Files", "", "Log Files (*.log);;All Files (*)", options=options)
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Open Log Files", "", "Log Files (*.log);;All Files (*)",
+                                                     options=options)
         if file_paths:
             self.log_file_paths = file_paths
             self.log_file_label.setText(f'{len(file_paths)} files uploaded')
+            logging.debug(f"Uploaded {len(file_paths)} files: {file_paths}")
 
     def check_for_errors(self):
-        if not hasattr(self, 'log_file_paths'):
+        if not self.log_file_paths:
             self.result_text.setText('Please upload log files first.')
+            logging.warning("No log files uploaded.")
             return
 
         start_date = self.start_date_edit.date().toPyDate()
         end_date = self.end_date_edit.date().toPyDate()
-
+        logging.debug(f"Checking for errors between {start_date} and {end_date}")
         filtered_lines = self.filter_logs_by_date(start_date, end_date)
-
-        filtered_log_file_path = 'filtered_log.log'
-        with open(filtered_log_file_path, 'w') as file:
-            file.writelines(filtered_lines)
-
-        # Check for specific errors using multithreading
         errors = self.find_errors(filtered_lines)
-
-        self.result_text.setText(f'Filtered logs saved to {filtered_log_file_path}\n\nErrors:\n{errors}')
+        summarized_errors = self.summarize_errors(errors)
+        self.result_text.setText(f'Errors:\n{summarized_errors}')
 
     def filter_logs_by_date(self, start_date, end_date):
         filtered_lines = []
@@ -84,9 +78,9 @@ class LogAnalyzer(QWidget):
                         log_date_str = line.split()[1]
                         log_date = datetime.datetime.strptime(log_date_str, '%m/%d/%Y').date()
                         include_line = start_date <= log_date <= end_date
-
                     if include_line:
                         filtered_lines.append(line)
+        logging.debug(f"Filtered lines: {filtered_lines}")
         return filtered_lines
 
     def find_errors(self, lines):
@@ -102,13 +96,12 @@ class LogAnalyzer(QWidget):
                 text_response = root.find('.//TextResponse')
                 if text_response is not None and "There still are requests to be forwarded. All \"Store And Forward\" requests should be forwarded before closing a batch." in text_response.text:
                     return f"{date}\nError: There still are requests to be forwarded. All 'Store And Forward' requests should be forwarded before closing a batch."
-            except ET.ParseError:
-                pass
+            except ET.ParseError as e:
+                logging.error(f"XML Parse Error: {e}")
             return None
 
         with ThreadPoolExecutor() as executor:
             futures = []
-
             for line in lines:
                 if 'Date:' in line:
                     current_date = line.strip()
@@ -122,13 +115,29 @@ class LogAnalyzer(QWidget):
                     current_message = []
                 elif inside_rstream:
                     current_message.append(line)
-
             for future in futures:
                 error_message = future.result()
                 if error_message:
                     error_lines.append(error_message)
-
+        logging.debug(f"Found errors: {error_lines}")
         return '\n'.join(error_lines)
+
+    def summarize_errors(self, error_messages):
+        openai.api_key = ''
+        logging.debug("Sending errors to OpenAI API for summarization.")
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a sentient program designed for analyzing logs from OrderCounter. OrderCounter is a POS System. You are given logs from the software. Review the logs and write a formatted summary indicating what happened."},
+                    {"role": "user", "content": error_messages}
+                ]
+            )
+            return response.choices[0].message['content']
+        except Exception as e:
+            logging.error(f"OpenAI API Error: {e}")
+            return "Error in summarizing the errors."
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
