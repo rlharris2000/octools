@@ -100,8 +100,16 @@ class LogAnalyzer(QWidget):
                 logging.error(f"XML Parse Error: {e}")
             return None
 
+        def process_out_of_memory(lines):
+            error_message = "\n".join(lines)
+            if "Error:          Out of memory." in error_message:
+                return error_message
+            return None
+
         with ThreadPoolExecutor() as executor:
             futures = []
+            out_of_memory_block = []
+            capture_block = False
             for line in lines:
                 if 'Date:' in line:
                     current_date = line.strip()
@@ -115,6 +123,18 @@ class LogAnalyzer(QWidget):
                     current_message = []
                 elif inside_rstream:
                     current_message.append(line)
+
+                # Capture out of memory error blocks
+                if 'Error:          Out of memory.' in line:
+                    capture_block = True
+                    out_of_memory_block = [current_date, line]
+                elif capture_block:
+                    if line.strip() == "":
+                        capture_block = False
+                        futures.append(executor.submit(process_out_of_memory, out_of_memory_block))
+                    else:
+                        out_of_memory_block.append(line)
+
             for future in futures:
                 error_message = future.result()
                 if error_message:
@@ -123,13 +143,14 @@ class LogAnalyzer(QWidget):
         return '\n'.join(error_lines)
 
     def summarize_errors(self, error_messages):
-        openai.api_key = ''
+        openai.api_key = 'cc-proj-pVbjrKMl4WZmOk3s9AvYT3BlbkFJdK31Kw9WxZM2LX0ssXzD'  # Set your OpenAI API key here
         logging.debug("Sending errors to OpenAI API for summarization.")
         try:
             response = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are a sentient program designed for analyzing logs from OrderCounter. OrderCounter is a POS System. You are given logs from the software. Review the logs and write a formatted summary indicating what happened."},
+                    {"role": "system",
+                     "content": "You are a sentient program designed for analyzing logs from OrderCounter. OrderCounter is a POS System. You are given logs from the software. Review the logs and write a formatted summary indicating what happened."},
                     {"role": "user", "content": error_messages}
                 ]
             )
